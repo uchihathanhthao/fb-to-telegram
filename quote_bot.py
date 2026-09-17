@@ -7,7 +7,6 @@ import pytz
 BOT_TOKEN = "8746522888:AAFZRNjOE8fa2O9XsBTyA3RnSBiNHOzHVaE"
 CHAT_ID = "-1003910530474"
 
-# Danh sách 16 câu quote truyền cảm hứng
 RAW_QUOTES = [
     "🌅 **LỜI NHẮC BUỔI SÁNG**\n\n'Nếu bạn dám thử thì tỉ lệ thành công là 50:50, còn nếu bạn đã chọn từ bỏ thì bạn chọn thất bại 100%.'",
     "🔥 **BẮT ĐẦU NGÀY MỚI**\n\n'Nó không khó, nó chỉ mới thôi!'",
@@ -27,12 +26,11 @@ RAW_QUOTES = [
     "🏆 **BẢN LĨNH**\n\n'Cuộc đua này không có người giỏi nhất, chỉ có người kiên trì nhất.'"
 ]
 
-# Tạo hàng đợi quote không trùng lặp
 quote_queue = []
 
 def get_next_quote():
     global quote_queue
-    # Nếu hàng đợi rỗng (mới chạy hoặc đã gửi hết), nạp lại và xáo trộn mới
+    # Nếu hàng đợi rỗng, xáo trộn lại danh sách quote để lặp lại chu kỳ mới
     if not quote_queue:
         quote_queue = RAW_QUOTES.copy()
         random.shuffle(quote_queue)
@@ -41,22 +39,23 @@ def get_next_quote():
 
 def send_quote():
     tz = pytz.timezone('Asia/Ho_Chi_Minh')
-    sent_slots = set() # Ghi nhớ khung giờ đã gửi trong ngày
+    sent_slots = set()
     
-    print("Bot Quote 5h sáng & 1h trưa đã sẵn sàng...")
+    print("Bot Quote (5h sáng, 13h trưa, 22h đêm) đã sẵn sàng...")
     
     while True:
         now = datetime.now(tz)
         current_time_slot = None
         
-        # Kiểm tra đúng 5:00 sáng
+        # Kiểm tra các khung giờ: 05:00, 13:00, 22:00
         if now.hour == 5 and now.minute == 0:
             current_time_slot = "5AM"
-        # Kiểm tra đúng 13:00 trưa (1h trưa)
         elif now.hour == 13 and now.minute == 0:
             current_time_slot = "1PM"
+        elif now.hour == 22 and now.minute == 0:
+            current_time_slot = "10PM"
             
-        # Nếu rơi vào đúng khung giờ và chưa gửi trong phút đó
+        # Gửi tin nhắn nếu rơi vào đúng khung giờ và chưa gửi trong phút đó
         if current_time_slot and current_time_slot not in sent_slots:
             quote_text = get_next_quote()
             url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
@@ -74,7 +73,7 @@ def send_quote():
             sent_slots.add(current_time_slot)
             time.sleep(60) # Chờ qua phút 00 để không gửi lặp lại
             
-        # Reset lại cờ đánh dấu khi sang phút khác (ví dụ phút 01)
+        # Reset lại cờ khi qua phút khác
         if now.minute != 0:
             sent_slots.clear()
             
