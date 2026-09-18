@@ -4,7 +4,7 @@ import random
 import threading
 from datetime import datetime
 import pytz
-from flask import Flask, request
+from flask import Flask
 
 BOT_TOKEN = "8746522888:AAFZRNjOE8fa2O9XsBTyA3RnSBiNHOzHVaE"
 CHAT_ID = "-1003910530474"
@@ -24,7 +24,7 @@ RAW_QUOTES = [
     "✈️ **ĐỘNG LỰC GIA ĐÌNH**\n\n'Vì một ngày có thể tự bỏ tiền đi du lịch thế giới CÙNG GIA ĐÌNH!'",
     "🚀 **MỤC TIÊU TIÊN PHONG**\n\n'**HÃY TRỞ THÀNH NGƯỜI ĐẦU TIÊN TRONG GIA ĐÌNH ĐẶT CHÂN ĐẾN ĐẤT NƯỚC KHÁC!**'",
     "🛡️ **KIÊN TRÌ**\n\n'Đừng chùn bước, chúng ta đã đi một đoạn rất xa rồi.'",
-    "🌱 **MỖI NGÀY MỘT CHÚT**\n\n'Cố chút nữa thôi! Bạn đã tốt hơn bạn của hôm qua rồi!'",
+    "🌱 **MỖI NGÀY MỘT CHÚT**\n\n'Cố chút nữa thôi! Bạn đã tốt me bạn của hôm qua rồi!'",
     "🏆 **BẢN LĨNH**\n\n'Cuộc đua này không có người giỏi nhất, chỉ có người kiên trì nhất.'"
 ]
 
@@ -45,14 +45,17 @@ def send_telegram_msg(text):
         "parse_mode": "Markdown"
     }
     try:
-        requests.post(url, json=payload, timeout=10)
+        r = requests.post(url, json=payload, timeout=10)
+        print("KẾT QUẢ GỬI:", r.json())
+        return r.json()
     except Exception as e:
-        print("Lỗi gửi Telegram:", e)
+        print("Lỗi kết nối:", e)
+        return str(e)
 
 def send_quote():
     tz = pytz.timezone('Asia/Ho_Chi_Minh')
     sent_slots = set()
-    print("Bot Quote đã khởi chạy thành công...")
+    print("Bot Quote đã khởi chạy...")
     
     while True:
         now = datetime.now(tz)
@@ -82,17 +85,11 @@ app = Flask(__name__)
 def home():
     return "Bot Quote đang hoạt động 24/7!"
 
-# Nhận tin nhắn /test từ Group Telegram gửi về Webhook
-@app.route('/webhook', methods=['POST'])
-def webhook():
-    data = request.get_json()
-    if data and "message" in data:
-        text = data["message"].get("text", "")
-        # Nếu người dùng gõ /test trong group
-        if text.startswith("/test"):
-            sample_quote = get_next_quote()
-            send_telegram_msg(f"🧪 **[TEST LỆNH]** Tin nhắn kiểm tra:\n\n{sample_quote}")
-    return "OK", 200
+@app.route('/test')
+def test_send():
+    sample_quote = get_next_quote()
+    res = send_telegram_msg(f"🧪 **[TEST THỦ CÔNG]**\n\n{sample_quote}")
+    return f"Kết quả gửi về Telegram: {res}"
 
 if __name__ == "__main__":
     t = threading.Thread(target=send_quote)
