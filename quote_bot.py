@@ -1,8 +1,10 @@
 import time
 import requests
 import random
+import threading
 from datetime import datetime
 import pytz
+from flask import Flask
 
 BOT_TOKEN = "8746522888:AAFZRNjOE8fa2O9XsBTyA3RnSBiNHOzHVaE"
 CHAT_ID = "-1003910530474"
@@ -30,24 +32,21 @@ quote_queue = []
 
 def get_next_quote():
     global quote_queue
-    # Nếu hàng đợi rỗng, xáo trộn lại danh sách quote để lặp lại chu kỳ mới
     if not quote_queue:
         quote_queue = RAW_QUOTES.copy()
         random.shuffle(quote_queue)
-        print("=> Đã lặp lại chu kỳ mới: Xáo trộn danh sách quote!")
     return quote_queue.pop(0)
 
 def send_quote():
     tz = pytz.timezone('Asia/Ho_Chi_Minh')
     sent_slots = set()
-    
-    print("Bot Quote (5h sáng, 13h trưa, 22h đêm) đã sẵn sàng...")
+    print("Bot Quote đã khởi chạy thành công...")
     
     while True:
         now = datetime.now(tz)
         current_time_slot = None
         
-        # Kiểm tra các khung giờ: 05:00, 13:00, 22:00
+        # 3 Khung giờ gửi tin
         if now.hour == 5 and now.minute == 0:
             current_time_slot = "5AM"
         elif now.hour == 13 and now.minute == 0:
@@ -55,7 +54,6 @@ def send_quote():
         elif now.hour == 22 and now.minute == 0:
             current_time_slot = "10PM"
             
-        # Gửi tin nhắn nếu rơi vào đúng khung giờ và chưa gửi trong phút đó
         if current_time_slot and current_time_slot not in sent_slots:
             quote_text = get_next_quote()
             url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
@@ -71,13 +69,22 @@ def send_quote():
                 print("Lỗi gửi Telegram:", e)
                 
             sent_slots.add(current_time_slot)
-            time.sleep(60) # Chờ qua phút 00 để không gửi lặp lại
+            time.sleep(60)
             
-        # Reset lại cờ khi qua phút khác
         if now.minute != 0:
             sent_slots.clear()
             
-        time.sleep(20) # Kiểm tra đồng hồ 20s/lần
+        time.sleep(20)
+
+# Khởi tạo Web Server để Render duy trì trạng thái LIVE
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "Bot Quote đang hoạt động 24/7!"
 
 if __name__ == "__main__":
-    send_quote()
+    t = threading.Thread(target=send_quote)
+    t.daemon = True
+    t.start()
+    app.run(host='0.0.0.0', port=8080)
