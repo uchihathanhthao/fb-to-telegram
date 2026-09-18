@@ -254,6 +254,47 @@ def health():
     return "OK", 200
 
 # ============================================================
+# 🧪 LỆNH TEST QUOTE VÀ TEST POST RIÊNG BIỆT
+# ============================================================
+
+@app.route("/testquote")
+def test_quote():
+    quote = get_next_quote()
+    test_message = f"🧪 **[TEST QUOTE]**\n\n{quote}"
+    success = send_telegram(test_message)
+    if success:
+        return "✅ Đã test gửi Quote thành công! Hãy kiểm tra Telegram."
+    return "❌ Test gửi Quote thất bại!"
+
+@app.route("/testpost")
+def test_post():
+    for page_name, feed_url in RSS_FEEDS.items():
+        entries = read_page_feed(page_name, feed_url)
+        if not entries:
+            continue
+        
+        # Lấy bài viết mới nhất đầu tiên tìm thấy bất kể cũ mới
+        entry = entries[0]
+        title = getattr(entry, "title", "Bài viết mới")
+        link = getattr(entry, "link", "")
+        
+        if not link:
+            continue
+            
+        message = (
+            f"🧪 **[TEST FACEBOOK POST]**\n\n"
+            f"📄 **Page:** {page_name}\n\n"
+            f"{title}\n\n"
+            f"🔗 [Xem bài viết]({link})"
+        )
+        
+        success = send_telegram(message)
+        if success:
+            return f"✅ Đã test gửi bài viết thành công từ page: <b>{page_name}</b>!"
+            
+    return "❌ Không tìm thấy bài viết nào từ các RSS feed để test."
+
+# ============================================================
 # 🚀 KHỞI ĐỘNG THREADS KHI IMPORT HOẶC CHẠY
 # ============================================================
 
