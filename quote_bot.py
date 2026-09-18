@@ -4,7 +4,7 @@ import random
 import threading
 from datetime import datetime
 import pytz
-from flask import Flask
+from flask import Flask, request
 
 BOT_TOKEN = "8746522888:AAFZRNjOE8fa2O9XsBTyA3RnSBiNHOzHVaE"
 CHAT_ID = "-1003910530474"
@@ -37,6 +37,18 @@ def get_next_quote():
         random.shuffle(quote_queue)
     return quote_queue.pop(0)
 
+def send_telegram_msg(text):
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": CHAT_ID,
+        "text": text,
+        "parse_mode": "Markdown"
+    }
+    try:
+        requests.post(url, json=payload, timeout=10)
+    except Exception as e:
+        print("Lỗi gửi Telegram:", e)
+
 def send_quote():
     tz = pytz.timezone('Asia/Ho_Chi_Minh')
     sent_slots = set()
@@ -46,7 +58,6 @@ def send_quote():
         now = datetime.now(tz)
         current_time_slot = None
         
-        # 3 Khung giờ gửi tin
         if now.hour == 5 and now.minute == 0:
             current_time_slot = "5AM"
         elif now.hour == 13 and now.minute == 0:
@@ -56,18 +67,7 @@ def send_quote():
             
         if current_time_slot and current_time_slot not in sent_slots:
             quote_text = get_next_quote()
-            url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-            payload = {
-                "chat_id": CHAT_ID,
-                "text": quote_text,
-                "parse_mode": "Markdown"
-            }
-            try:
-                requests.post(url, json=payload, timeout=10)
-                print(f"[{now}] Đã gửi quote khung giờ {current_time_slot} thành công!")
-            except Exception as e:
-                print("Lỗi gửi Telegram:", e)
-                
+            send_telegram_msg(quote_text)
             sent_slots.add(current_time_slot)
             time.sleep(60)
             
@@ -76,12 +76,23 @@ def send_quote():
             
         time.sleep(20)
 
-# Khởi tạo Web Server để Render duy trì trạng thái LIVE
 app = Flask(__name__)
 
 @app.route('/')
 def home():
     return "Bot Quote đang hoạt động 24/7!"
+
+# Nhận tin nhắn /test từ Group Telegram gửi về Webhook
+@app.route('/webhook', methods=['POST'])
+def webhook():
+    data = request.get_json()
+    if data and "message" in data:
+        text = data["message"].get("text", "")
+        # Nếu người dùng gõ /test trong group
+        if text.startswith("/test"):
+            sample_quote = get_next_quote()
+            send_telegram_msg(f"🧪 **[TEST LỆNH]** Tin nhắn kiểm tra:\n\n{sample_quote}")
+    return "OK", 200
 
 if __name__ == "__main__":
     t = threading.Thread(target=send_quote)
