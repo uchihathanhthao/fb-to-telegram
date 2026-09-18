@@ -1,11 +1,11 @@
 import time
-import feedparser
 import requests
 import random
 import threading
 from datetime import datetime
 import pytz
 from flask import Flask
+from bs4 import BeautifulSoup
 
 # ============================================================
 # 🔐 TELEGRAM BOT TOKEN
@@ -46,8 +46,9 @@ PAGE_LIST = [
     "khoangoaingu.tdmu"
 ]
 
+# Không cần dùng RSS trung gian nữa, lưu trực tiếp tên Page
 RSS_FEEDS = {
-    page: f"https://fetchrss.com/rss/feed?url=https://facebook.com/{page}"
+    page: f"https://m.facebook.com/{page}"
     for page in PAGE_LIST
 }
 
@@ -128,15 +129,46 @@ def send_facebook_post(page_name, title, link):
         print(f"❌ GỬI THẤT BẠI | {page_name} | {title}")
     return success
 
-def read_page_feed(page_name, feed_url):
+# ============================================================
+# 🔎 CÀO TRỰC TIẾP TỪ M.FACEBOOK.COM
+# ============================================================
+
+def read_page_feed(page_name, target_url):
     try:
-        print(f"🔎 Đang kiểm tra: {page_name}")
-        feed = feedparser.parse(feed_url)
-        entries = feed.entries[:10]
+        print(f"🔎 Đang cào trực tiếp: {page_name}")
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        }
+        response = requests.get(target_url, headers=headers, timeout=15)
+        if not response.ok:
+            return []
+
+        soup = BeautifulSoup(response.text, 'html.parser')
+        entries = []
+        
+        # Cào các bài viết dạng thẻ article trên bản mobile facebook
+        for article in soup.find_all('article')[:5]:
+            text_content = article.get_text(separator=" ", strip=True)
+            if len(text_content) > 10:
+                link_tag = article.find('a', href=True)
+                # Lấy link chi tiết bài viết nếu có, không thì trỏ về page
+                if link_tag and '/posts/' in link_tag['href']:
+                    post_link = f"https://facebook.com{link_tag['href']}"
+                else:
+                    post_link = f"https://facebook.com/{page_name}"
+                
+                class DummyEntry:
+                    pass
+                entry = DummyEntry()
+                entry.id = post_link
+                entry.title = text_content[:200] + "..."
+                entry.link = post_link
+                entries.append(entry)
+
         print(f"   → {page_name}: tìm thấy {len(entries)} bài")
         return entries
     except Exception as error:
-        print(f"❌ Lỗi đọc RSS {page_name}: {error}")
+        print(f"❌ Lỗi cào trực tiếp {page_name}: {error}")
         return []
 
 def get_post_id(entry):
@@ -153,7 +185,7 @@ def get_post_id(entry):
 def check_facebook():
     first_run = True
     print("=" * 60)
-    print("🚀 FACEBOOK → TELEGRAM BOT KHỞI ĐỘNG")
+    print("🚀 FACEBOOK SCRAPER BOT KHỞI ĐỘNG")
     print(f"📌 Số Page: {len(PAGE_LIST)}")
     print("⏱️ Chu kỳ quét: 5 phút")
     print("=" * 60)
@@ -242,7 +274,7 @@ app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "✅ Facebook → Telegram Bot đang chạy 24/7."
+    return "✅ Facebook Scraper Bot đang chạy 24/7."
 
 @app.route("/test")
 def test_send():
@@ -273,7 +305,6 @@ def test_post():
         if not entries:
             continue
         
-        # Lấy bài viết mới nhất đầu tiên tìm thấy bất kể cũ mới
         entry = entries[0]
         title = getattr(entry, "title", "Bài viết mới")
         link = getattr(entry, "link", "")
@@ -292,7 +323,7 @@ def test_post():
         if success:
             return f"✅ Đã test gửi bài viết thành công từ page: <b>{page_name}</b>!"
             
-    return "❌ Không tìm thấy bài viết nào từ các RSS feed để test."
+    return "❌ Không tìm thấy bài viết nào để test."
 
 # ============================================================
 # 🚀 KHỞI ĐỘNG THREADS KHI IMPORT HOẶC CHẠY
@@ -303,15 +334,12 @@ def start_background_tasks():
         print("❌ CHƯA ĐIỀN BOT_TOKEN!")
         return
 
-    # Khởi động Thread Facebook
     fb_thread = threading.Thread(target=check_facebook, name="FacebookMonitor", daemon=True)
     fb_thread.start()
 
-    # Khởi động Thread Quote
     q_thread = threading.Thread(target=check_quotes, name="QuoteScheduler", daemon=True)
     q_thread.start()
 
-# Tự động chạy nền khi khởi động ứng dụng
 start_background_tasks()
 
 if __name__ == "__main__":
