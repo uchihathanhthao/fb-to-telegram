@@ -44,6 +44,7 @@ PAGE_LIST = [
     "KyNangTDMU",
     "FFL.TDMU",
     "khoangoaingu.tdmu"
+    "100076805206008"
 ]
 
 # Không cần dùng RSS trung gian nữa, lưu trực tiếp tên Page
