@@ -43,11 +43,11 @@ PAGE_LIST = [
     "clbthanhnientinhnguyen.tdmu",
     "KyNangTDMU",
     "FFL.TDMU",
-    "khoangoaingu.tdmu"
+    "khoangoaingu.tdmu",
     "100076805206008"
 ]
 
-# Không cần dùng RSS trung gian nữa, lưu trực tiếp tên Page
+# Trỏ trực tiếp tới link mobile facebook của từng page
 RSS_FEEDS = {
     page: f"https://m.facebook.com/{page}"
     for page in PAGE_LIST
@@ -131,28 +131,33 @@ def send_facebook_post(page_name, title, link):
     return success
 
 # ============================================================
-# 🔎 CÀO TRỰC TIẾP TỪ M.FACEBOOK.COM
+# 🔎 CÀO TRỰC TIẾP QUA PROXY GATEWAY AN TOÀN
 # ============================================================
 
 def read_page_feed(page_name, target_url):
     try:
-        print(f"🔎 Đang cào trực tiếp: {page_name}")
+        print(f"🔎 Đang quét page: {page_name}")
+        
+        # Sử dụng proxy gateway để vượt rào chặn IP trên cloud server
+        proxied_url = f"https://api.allorigins.win/raw?url={requests.utils.quote(target_url)}"
+        
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         }
-        response = requests.get(target_url, headers=headers, timeout=15)
+        
+        response = requests.get(proxied_url, headers=headers, timeout=20)
         if not response.ok:
+            print(f"   ⚠️ Không thể kết nối tới {page_name} (HTTP {response.status_code})")
             return []
 
         soup = BeautifulSoup(response.text, 'html.parser')
         entries = []
         
-        # Cào các bài viết dạng thẻ article trên bản mobile facebook
+        # Quét các thẻ bài viết trên bản mobile facebook
         for article in soup.find_all('article')[:5]:
             text_content = article.get_text(separator=" ", strip=True)
             if len(text_content) > 10:
                 link_tag = article.find('a', href=True)
-                # Lấy link chi tiết bài viết nếu có, không thì trỏ về page
                 if link_tag and '/posts/' in link_tag['href']:
                     post_link = f"https://facebook.com{link_tag['href']}"
                 else:
@@ -169,7 +174,7 @@ def read_page_feed(page_name, target_url):
         print(f"   → {page_name}: tìm thấy {len(entries)} bài")
         return entries
     except Exception as error:
-        print(f"❌ Lỗi cào trực tiếp {page_name}: {error}")
+        print(f"❌ Lỗi quét {page_name}: {error}")
         return []
 
 def get_post_id(entry):
@@ -306,15 +311,16 @@ def test_post():
         if not entries:
             continue
         
+        # Lấy ngay bài viết gần nhất (top đầu tiên) bất kể cũ mới để test
         entry = entries[0]
         title = getattr(entry, "title", "Bài viết mới")
         link = getattr(entry, "link", "")
         
         if not link:
-            continue
+            link = f"https://facebook.com/{page_name}"
             
         message = (
-            f"🧪 **[TEST FACEBOOK POST]**\n\n"
+            f"🧪 **[TEST BÀI ĐĂNG GẦN NHẤT]**\n\n"
             f"📄 **Page:** {page_name}\n\n"
             f"{title}\n\n"
             f"🔗 [Xem bài viết]({link})"
@@ -322,16 +328,18 @@ def test_post():
         
         success = send_telegram(message)
         if success:
-            return f"✅ Đã test gửi bài viết thành công từ page: <b>{page_name}</b>!"
+            return f"✅ Đã test lấy thành công bài viết gần nhất từ page: <b>{page_name}</b>!"
+        else:
+            return f"❌ Lỗi khi gửi tin nhắn test về Telegram cho page: {page_name}"
             
-    return "❌ Không tìm thấy bài viết nào để test."
+    return "❌ Không thể cào được bài viết nào từ danh sách các page lúc này."
 
 # ============================================================
 # 🚀 KHỞI ĐỘNG THREADS KHI IMPORT HOẶC CHẠY
 # ============================================================
 
 def start_background_tasks():
-    if not BOT_TOKEN or BOT_TOKEN == "..":
+    if not BOT_TOKEN or "phần này" in BOT_TOKEN:
         print("❌ CHƯA ĐIỀN BOT_TOKEN!")
         return
 
