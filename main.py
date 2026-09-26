@@ -61,26 +61,26 @@ sent_posts = set()
 posts_lock = threading.Lock()
 
 # ============================================================
-# 💬 QUOTES
+# 💬 QUOTES (ĐÃ LƯỢC BỎ ICON VÀ TIÊU ĐỀ PHỤ)
 # ============================================================
 
 RAW_QUOTES = [
-    "🌅 **LỜI NHẮC BUỔI SÁNG**\n\n'Nếu bạn dám thử thì tỉ lệ thành công là 50:50, còn nếu bạn đã chọn từ bỏ thì bạn chọn thất bại 100%.'",
-    "🔥 **BẮT ĐẦU NGÀY MỚI**\n\n'Nó không khó, nó chỉ mới thôi!'",
-    "💡 **TƯ DUY ĐÚNG ĐẮN**\n\n'Học nhanh có lợi hơn là học nhiều.'",
-    "⚙️ **TỐI ƯU HÓA**\n\n'Hệ thống quan trọng hơn nỗ lực.'",
-    "🎯 **BỨC PHÁ BẢN THÂN**\n\n'Trở thành thiên tài là điều có thể *bắt chước được*.'",
-    "⚡ **TẬP TRUNG CAO ĐỘ**\n\n'**FOCUS NOT BALANCE** - Tập trung vào mục tiêu!'",
-    "⏳ **LỜI NHẮC THỜI GIAN**\n\n'Thời gian là hữu hạn, liệu ba mẹ bạn có thể đợi đến ngày bạn thành công?'",
-    "🪞 **LỜI THỨC TỈNH**\n\n'10 năm sau bạn sẽ là hình mẫu hay là nỗi nhục của chính bản thân năm 17 tuổi?'",
-    "🌍 **MỤC TIÊU LỚN**\n\n'Ước mơ chu du thế giới liệu có còn đó?'",
-    "🔔 **BÁO THỨC BẢN THÂN**\n\n'Bạn chọn thức dậy và nỗ lực tới ước mơ hay ngủ và mơ tiếp giấc mơ đó?'",
-    "🚨 **LỜI CẢNH BÁO**\n\n'Ba mẹ, ông bà, người thân **KHÔNG CHỜ BẠN ĐƯỢC ĐÂU!**'",
-    "✈️ **ĐỘNG LỰC GIA ĐÌNH**\n\n'Vì một ngày có thể tự bỏ tiền đi du lịch thế giới CÙNG GIA ĐÌNH!'",
-    "🚀 **MỤC TIÊU TIÊN PHONG**\n\n'**HÃY TRỞ THÀNH NGƯỜI ĐẦU TIÊN TRONG GIA ĐÌNH ĐẶT CHÂN ĐẾN ĐẤT NƯỚC KHÁC!**'",
-    "🛡️ **KIÊN TRÌ**\n\n'Đừng chùn bước, chúng ta đã đi một đoạn rất xa rồi.'",
-    "🌱 **MỖI NGÀY MỘT CHÚT**\n\n'Cố chút nữa thôi! Bạn đã tốt hơn bạn của hôm qua rồi!'",
-    "🏆 **BẢN LĨNH**\n\n'Cuộc đua này không có người giỏi nhất, chỉ có người kiên trì nhất.'"
+    "Nếu bạn dám thử thì tỉ lệ thành công là 50:50, còn nếu bạn đã chọn từ bỏ thì bạn chọn thất bại 100%.",
+    "Nó không khó, nó chỉ mới thôi!",
+    "Học nhanh có lợi hơn là học nhiều.",
+    "Hệ thống quan trọng hơn nỗ lực.",
+    "Trở thành thiên tài là điều có thể bắt chước được.",
+    "FOCUS NOT BALANCE - Tập trung vào mục tiêu!",
+    "Thời gian là hữu hạn, liệu ba mẹ bạn có thể đợi đến ngày bạn thành công?",
+    "10 năm sau bạn sẽ là hình mẫu hay là nỗi nhục của chính bản thân năm 17 tuổi?",
+    "Ước mơ chu du thế giới liệu có còn đó?",
+    "Bạn chọn thức dậy và nỗ lực tới ước mơ hay ngủ và mơ tiếp giấc mơ đó?",
+    "Ba mẹ, ông bà, người thân KHÔNG CHỜ BẠN ĐƯỢC ĐÂU!",
+    "Vì một ngày có thể tự bỏ tiền đi du lịch thế giới CÙNG GIA ĐÌNH!",
+    "HÃY TRỞ THÀNH NGƯỜI ĐẦU TIÊN TRONG GIA ĐÌNH ĐẶT CHÂN ĐẾN ĐẤT NƯỚC KHÁC!",
+    "Đừng chùn bước, chúng ta đã đi một đoạn rất xa rồi.",
+    "Cố chút nữa thôi! Bạn đã tốt hơn bạn của hôm qua rồi!",
+    "Cuộc đua này không có người giỏi nhất, chỉ có người kiên trì nhất."
 ]
 
 quote_queue = []
@@ -138,7 +138,6 @@ def read_page_feed(page_name, target_url):
     try:
         print(f"🔎 Đang quét page: {page_name}")
         
-        # Sử dụng proxy gateway để vượt rào chặn IP trên cloud server
         proxied_url = f"https://api.allorigins.win/raw?url={requests.utils.quote(target_url)}"
         
         headers = {
@@ -153,13 +152,16 @@ def read_page_feed(page_name, target_url):
         soup = BeautifulSoup(response.text, 'html.parser')
         entries = []
         
-        # Quét các thẻ bài viết trên bản mobile facebook
-        for article in soup.find_all('article')[:5]:
-            text_content = article.get_text(separator=" ", strip=True)
-            if len(text_content) > 10:
-                link_tag = article.find('a', href=True)
-                if link_tag and '/posts/' in link_tag['href']:
-                    post_link = f"https://facebook.com{link_tag['href']}"
+        posts = soup.find_all(['article', 'div'], class_ = lambda x: x and ('story' in x.lower() or 'post' in x.lower()))
+        if not posts:
+            posts = soup.find_all('div', style=True) or soup.find_all('p')
+
+        for item in posts[:10]:
+            text_content = item.get_text(separator=" ", strip=True)
+            if len(text_content) > 30:
+                link_tag = item.find('a', href=True)
+                if link_tag and ('/posts/' in link_tag['href'] or '/photos/' in link_tag['href'] or 'story.php' in link_tag['href']):
+                    post_link = f"https://facebook.com{link_tag['href']}" if link_tag['href'].startswith('/') else link_tag['href']
                 else:
                     post_link = f"https://facebook.com/{page_name}"
                 
@@ -169,7 +171,9 @@ def read_page_feed(page_name, target_url):
                 entry.id = post_link
                 entry.title = text_content[:200] + "..."
                 entry.link = post_link
-                entries.append(entry)
+                
+                if not any(e.link == post_link for e in entries):
+                    entries.append(entry)
 
         print(f"   → {page_name}: tìm thấy {len(entries)} bài")
         return entries
@@ -292,7 +296,7 @@ def health():
     return "OK", 200
 
 # ============================================================
-# 🧪 LỆNH TEST QUOTE VÀ TEST POST RIÊNG BIỆT
+# 🧪 LỆNH TEST QUOTE VÀ TEST POST GẦN NHẤT
 # ============================================================
 
 @app.route("/testquote")
@@ -311,7 +315,7 @@ def test_post():
         if not entries:
             continue
         
-        # Lấy ngay bài viết gần nhất (top đầu tiên) bất kể cũ mới để test
+        # Bốc ngay bài đăng gần nhất (phần tử đầu tiên) để test ngay lập tức
         entry = entries[0]
         title = getattr(entry, "title", "Bài viết mới")
         link = getattr(entry, "link", "")
