@@ -131,7 +131,7 @@ def send_facebook_post(page_name, title, link):
     return success
 
 # ============================================================
-# 🔎 CÀO TRỰC TIẾP QUA PROXY GATEWAY AN TOÀN
+# 🔎 CÀO TRỰC TIẾP QUA PROXY GATEWAY AN TOÀN (CÓ LỌC RÁC)
 # ============================================================
 
 def read_page_feed(page_name, target_url):
@@ -158,6 +158,11 @@ def read_page_feed(page_name, target_url):
 
         for item in posts[:10]:
             text_content = item.get_text(separator=" ", strip=True)
+            
+            # 🛑 Lọc bỏ các thông báo rác hoặc màn hình chặn của Facebook
+            if any(keyword in text_content.lower() for keyword in ["not available on this browser", "log in", "create new account", "forgot password"]):
+                continue
+
             if len(text_content) > 30:
                 link_tag = item.find('a', href=True)
                 if link_tag and ('/posts/' in link_tag['href'] or '/photos/' in link_tag['href'] or 'story.php' in link_tag['href']):
@@ -239,23 +244,31 @@ def check_facebook():
         time.sleep(300)
 
 # ============================================================
-# ⏰ HỆ THỐNG QUOTE
+# ⏰ HỆ THỐNG QUOTE VÀ NHẮC NHỞ "PHẢI HƠN ĐIỂM THẰNG BẢO!"
 # ============================================================
 
 def check_quotes():
     timezone = pytz.timezone("Asia/Ho_Chi_Minh")
     sent_slots = set()
-    print("💬 Hệ thống Quote đã khởi chạy.")
+    sent_bao_slots = set()
+    print("💬 Hệ thống Quote và Nhắc nhở đã khởi chạy.")
+
+    # Các khung giờ gửi câu "PHẢI HƠN ĐIỂM THẰNG BẢO!" (cách nhau 2 tiếng: 0h, 2h, 4h, ..., 22h)
+    bao_hours = [0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22]
 
     while True:
         try:
             now = datetime.now(timezone)
+            current_hour = now.hour
+            current_minute = now.minute
+
+            # 1. Gửi Quote mặc định (vào lúc 05:00, 13:00, 22:00)
             slot = None
-            if now.hour == 5 and now.minute == 0:
+            if current_hour == 5 and current_minute == 0:
                 slot = "05:00"
-            elif now.hour == 13 and now.minute == 0:
+            elif current_hour == 13 and current_minute == 0:
                 slot = "13:00"
-            elif now.hour == 22 and now.minute == 0:
+            elif current_hour == 22 and current_minute == 0:
                 slot = "22:00"
 
             if slot and slot not in sent_slots:
@@ -266,9 +279,21 @@ def check_quotes():
                     sent_slots.add(slot)
                 time.sleep(60)
 
-            if now.hour == 0 and now.minute == 1:
+            # 2. Gửi câu "PHẢI HƠN ĐIỂM THẰNG BẢO!" cách mỗi 2 tiếng đúng phút 00
+            if current_hour in bao_hours and current_minute == 0:
+                bao_key = f"{current_hour:02d}:00"
+                if bao_key not in sent_bao_slots:
+                    print(f"🔥 Đang gửi nhắc nhở lúc {bao_key}...")
+                    success = send_telegram("PHẢI HƠN ĐIỂM THẰNG BẢO!")
+                    if success:
+                        sent_bao_slots.add(bao_key)
+                    time.sleep(60)
+
+            # Reset lại danh sách đã gửi vào đầu ngày mới (00:01)
+            if current_hour == 0 and current_minute == 1:
                 sent_slots.clear()
-                print("🔄 Đã reset lịch quote cho ngày mới.")
+                sent_bao_slots.clear()
+                print("🔄 Đã reset lịch nhắc nhở và quote cho ngày mới.")
                 time.sleep(60)
 
             time.sleep(20)
@@ -307,6 +332,11 @@ def test_quote():
     if success:
         return "✅ Đã test gửi Quote thành công! Hãy kiểm tra Telegram."
     return "❌ Test gửi Quote thất bại!"
+
+@app.route("/testbao")
+def test_bao():
+    success = send_telegram("PHẢI HƠN ĐIỂM THẰNG BẢO!")
+    return "✅ Đã test gửi câu nhắc Thằng Bảo!" if success else "❌ Test thất bại!"
 
 @app.route("/testpost")
 def test_post():
