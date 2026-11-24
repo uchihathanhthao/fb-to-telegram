@@ -1,26 +1,30 @@
 import os
 import time
-import requests
+import html
 import random
 import threading
-from datetime import datetime
-import pytz
+from datetime import datetime, timedelta, timezone
+
+import requests
 from flask import Flask
-from bs4 import BeautifulSoup
 
 # ============================================================
-# 🔐 TELEGRAM BOT TOKEN
+# 🔐 BÍ MẬT (đặt trong Render > Environment, KHÔNG viết vào code)
+#   BOT_TOKEN   : token bot Telegram
+#   APIFY_TOKEN : token tài khoản Apify
 # ============================================================
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
-# ============================================================
-# ⚙️ TELEGRAM CHAT ID
-# ============================================================
-
-CHAT_ID = "-1003910530474"
+APIFY_TOKEN = os.environ.get("APIFY_TOKEN", "")
 
 # ============================================================
-# 📘 FACEBOOK PAGES
+# ⚙️ TELEGRAM CHAT ID (nhóm/kênh nhận tin)
+# ============================================================
+
+CHAT_ID = os.environ.get("CHAT_ID", "-1003910530474")
+
+# ============================================================
+# 📘 CÁC PAGE FACEBOOK CẦN THEO DÕI
 # ============================================================
 
 PAGE_LIST = [
@@ -44,24 +48,67 @@ PAGE_LIST = [
     "KyNangTDMU",
     "FFL.TDMU",
     "khoangoaingu.tdmu",
-    "100076805206008"
+    "100076805206008",
 ]
 
-# Trỏ trực tiếp tới link mobile facebook của từng page
-RSS_FEEDS = {
-    page: f"https://m.facebook.com/{page}"
-    for page in PAGE_LIST
+# Các page ít đăng bài (bài mới nhất là bài rất cũ). Quét thưa hơn, không dùng bộ lọc thời gian,
+# vì bài ghim cũ có thể làm bộ lọc dừng quá sớm.
+SLOW_PAGES = [
+    "clbthanhnientinhnguyen.tdmu",
+    "100076805206008",
+]
+
+FAST_PAGES = [p for p in PAGE_LIST if p not in SLOW_PAGES]
+
+# ============================================================
+# ⏱️ CẤU HÌNH QUÉT + CHI PHÍ APIFY
+# ============================================================
+
+APIFY_ACTOR = "alfalfa~facebook-posts-scraper"
+APIFY_API = "https://api.apify.com/v2"
+
+SCAN_INTERVAL_SEC = 30 * 60        # quét nhóm page chính mỗi 30 phút
+WINDOW_MIN = 75                    # mỗi lần chỉ xin bài đăng trong 75 phút gần nhất
+RESULTS_LIMIT_FAST = 10            # tối đa 10 bài / page / lần quét
+MAX_AGE_HOURS_FAST = 6             # chốt an toàn: bỏ qua bài cũ hơn 6 giờ
+MAX_CHARGE_FAST_USD = 0.10         # trần chi phí cho 1 lần quét (khoảng 50 bài)
+
+SLOW_INTERVAL_SEC = 12 * 3600      # nhóm page ít đăng: quét mỗi 12 giờ
+RESULTS_LIMIT_SLOW = 3
+MAX_AGE_HOURS_SLOW = 72
+MAX_CHARGE_SLOW_USD = 0.05
+
+MAX_SEND_PER_SCAN = 20             # chống gửi quá nhiều tin một lúc
+PREVIEW_CHARS = 350                # số ký tự xem trước của bài
+
+VN_TZ = timezone(timedelta(hours=7))  # giờ Việt Nam (UTC+7, không đổi giờ mùa hè)
+
+
+def page_url(page):
+    """Tạo link Facebook từ tên page hoặc ID số."""
+    if page.isdigit():
+        return f"https://www.facebook.com/profile.php?id={page}"
+    return f"https://www.facebook.com/{page}"
+
+
+# ============================================================
+# 🧠 BỘ NHỚ (bài đã gửi, trạng thái quét)
+# ============================================================
+
+sent_posts = {}                    # link bài -> thời điểm đã gửi
+posts_lock = threading.Lock()
+
+status = {
+    "started_at": datetime.now(VN_TZ).strftime("%d/%m/%Y %H:%M:%S"),
+    "last_scan": "chưa quét lần nào",
+    "last_result": "-",
+    "scans_ok": 0,
+    "scans_failed": 0,
+    "posts_sent": 0,
 }
 
 # ============================================================
-# 🧠 BỘ NHỚ BÀI ĐÃ GỬI
-# ============================================================
-
-sent_posts = set()
-posts_lock = threading.Lock()
-
-# ============================================================
-# 💬 QUOTES (ĐÃ LƯỢC BỎ ICON VÀ TIÊU ĐỀ PHỤ)
+# 💬 QUOTES
 # ============================================================
 
 RAW_QUOTES = [
@@ -80,11 +127,12 @@ RAW_QUOTES = [
     "HÃY TRỞ THÀNH NGƯỜI ĐẦU TIÊN TRONG GIA ĐÌNH ĐẶT CHÂN ĐẾN ĐẤT NƯỚC KHÁC!",
     "Đừng chùn bước, chúng ta đã đi một đoạn rất xa rồi.",
     "Cố chút nữa thôi! Bạn đã tốt hơn bạn của hôm qua rồi!",
-    "Cuộc đua này không có người giỏi nhất, chỉ có người kiên trì nhất."
+    "Cuộc đua này không có người giỏi nhất, chỉ có người kiên trì nhất.",
 ]
 
 quote_queue = []
 quote_lock = threading.Lock()
+
 
 def get_next_quote():
     global quote_queue
@@ -94,296 +142,415 @@ def get_next_quote():
             random.shuffle(quote_queue)
         return quote_queue.pop(0)
 
+
 # ============================================================
 # 📤 GỬI TELEGRAM
 # ============================================================
 
-def send_telegram(text):
+def send_telegram(text, html_mode=False):
+    """Gửi tin nhắn. Tự thử lại tối đa 3 lần khi mạng chậm."""
+    if not BOT_TOKEN:
+        print("❌ Chưa có BOT_TOKEN trong Environment của Render.")
+        return False
+
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     payload = {
         "chat_id": CHAT_ID,
         "text": text,
-        "parse_mode": "Markdown",
-        "disable_web_page_preview": False
+        "disable_web_page_preview": True,
     }
-    try:
-        response = requests.post(url, json=payload, timeout=15)
-        print(f"Telegram HTTP {response.status_code}: {response.text[:500]}")
-        return response.ok
-    except Exception as error:
-        print(f"❌ Lỗi kết nối Telegram: {error}")
-        return False
+    if html_mode:
+        payload["parse_mode"] = "HTML"
 
-def send_facebook_post(page_name, title, link):
-    if not title:
-        title = "Bài viết mới"
-    message = (
-        f"📢 **BÀI VIẾT MỚI**\n\n"
-        f"📄 **Page:** {page_name}\n\n"
-        f"{title}\n\n"
-        f"🔗 [Xem bài viết]({link})"
-    )
-    success = send_telegram(message)
-    if success:
-        print(f"✅ ĐÃ GỬI | {page_name} | {title}")
-    else:
-        print(f"❌ GỬI THẤT BẠI | {page_name} | {title}")
-    return success
-
-# ============================================================
-# 🔎 CÀO TRỰC TIẾP QUA PROXY GATEWAY AN TOÀN (CÓ LỌC RÁC)
-# ============================================================
-
-def read_page_feed(page_name, target_url):
-    try:
-        print(f"🔎 Đang quét page: {page_name}")
-        
-        proxied_url = f"https://api.allorigins.win/raw?url={requests.utils.quote(target_url)}"
-        
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        }
-        
-        response = requests.get(proxied_url, headers=headers, timeout=20)
-        if not response.ok:
-            print(f"   ⚠️ Không thể kết nối tới {page_name} (HTTP {response.status_code})")
-            return []
-
-        soup = BeautifulSoup(response.text, 'html.parser')
-        entries = []
-        
-        posts = soup.find_all(['article', 'div'], class_ = lambda x: x and ('story' in x.lower() or 'post' in x.lower()))
-        if not posts:
-            posts = soup.find_all('div', style=True) or soup.find_all('p')
-
-        for item in posts[:10]:
-            text_content = item.get_text(separator=" ", strip=True)
-            
-            # 🛑 Lọc bỏ các thông báo rác hoặc màn hình chặn của Facebook
-            if any(keyword in text_content.lower() for keyword in ["not available on this browser", "log in", "create new account", "forgot password"]):
+    for attempt in range(1, 4):
+        try:
+            response = requests.post(url, json=payload, timeout=30)
+            if response.ok:
+                return True
+            print(f"Telegram HTTP {response.status_code}: {response.text[:300]}")
+            if response.status_code == 429:
+                try:
+                    wait = int(response.json().get("parameters", {}).get("retry_after", 5))
+                except Exception:
+                    wait = 5
+                time.sleep(min(wait, 30))
                 continue
+            if response.status_code in (400, 401, 403, 404):
+                return False  # lỗi cố định (token/nhóm/nội dung), thử lại vô ích
+        except requests.RequestException as error:
+            # Chỉ in tên lỗi, KHÔNG in nội dung lỗi vì có thể chứa token trong đường link.
+            print(f"⚠️ Lỗi kết nối Telegram (lần {attempt}/3): {type(error).__name__}")
+        time.sleep(3 * attempt)
+    return False
 
-            if len(text_content) > 30:
-                link_tag = item.find('a', href=True)
-                if link_tag and ('/posts/' in link_tag['href'] or '/photos/' in link_tag['href'] or 'story.php' in link_tag['href']):
-                    post_link = f"https://facebook.com{link_tag['href']}" if link_tag['href'].startswith('/') else link_tag['href']
-                else:
-                    post_link = f"https://facebook.com/{page_name}"
-                
-                class DummyEntry:
-                    pass
-                entry = DummyEntry()
-                entry.id = post_link
-                entry.title = text_content[:200] + "..."
-                entry.link = post_link
-                
-                if not any(e.link == post_link for e in entries):
-                    entries.append(entry)
 
-        print(f"   → {page_name}: tìm thấy {len(entries)} bài")
-        return entries
-    except Exception as error:
-        print(f"❌ Lỗi quét {page_name}: {error}")
-        return []
+# ============================================================
+# 🔎 LẤY BÀI TỪ FACEBOOK QUA APIFY
+# ============================================================
 
-def get_post_id(entry):
-    if getattr(entry, "id", None):
-        return str(entry.id)
-    if getattr(entry, "link", None):
-        return str(entry.link)
+def _apify_headers():
+    return {"Authorization": f"Bearer {APIFY_TOKEN}"}
+
+
+def run_apify(urls, results_limit, newer_than=None, max_charge=0.10):
+    """Chạy actor lấy bài Facebook, chờ xong và trả về danh sách bài."""
+    input_data = {
+        "startUrls": [{"url": u} for u in urls],
+        "resultsLimit": results_limit,
+    }
+    if newer_than:
+        input_data["onlyPostsNewerThan"] = newer_than
+
+    response = requests.post(
+        f"{APIFY_API}/acts/{APIFY_ACTOR}/runs",
+        params={"maxTotalChargeUsd": max_charge, "timeout": 600},
+        json=input_data,
+        headers=_apify_headers(),
+        timeout=30,
+    )
+    response.raise_for_status()
+    run = response.json()["data"]
+    run_id = run["id"]
+    dataset_id = run["defaultDatasetId"]
+    run_status = run.get("status", "READY")
+
+    deadline = time.time() + 15 * 60
+    while run_status in ("READY", "RUNNING", "TIMING-OUT", "ABORTING"):
+        if time.time() > deadline:
+            raise RuntimeError("Apify chạy quá lâu (hơn 15 phút)")
+        poll = requests.get(
+            f"{APIFY_API}/actor-runs/{run_id}",
+            params={"waitForFinish": 30},
+            headers=_apify_headers(),
+            timeout=60,
+        )
+        poll.raise_for_status()
+        run_status = poll.json()["data"]["status"]
+
+    if run_status != "SUCCEEDED":
+        raise RuntimeError(f"Apify kết thúc với trạng thái {run_status}")
+
+    items = requests.get(
+        f"{APIFY_API}/datasets/{dataset_id}/items",
+        params={"format": "json"},
+        headers=_apify_headers(),
+        timeout=60,
+    )
+    items.raise_for_status()
+    data = items.json()
+    return data if isinstance(data, list) else []
+
+
+# ============================================================
+# ✉️ ĐỊNH DẠNG TIN NHẮN BÀI ĐĂNG
+# ============================================================
+
+def parse_post_time(item):
+    """Đọc thời gian đăng bài, trả về datetime (UTC) hoặc None."""
+    raw = item.get("time")
+    if isinstance(raw, str) and raw:
+        try:
+            dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.astimezone(timezone.utc)
+        except ValueError:
+            pass
+    stamp = item.get("timestamp")
+    if isinstance(stamp, (int, float)) and stamp > 0:
+        if stamp > 1e12:  # mili giây
+            stamp = stamp / 1000
+        return datetime.fromtimestamp(stamp, tz=timezone.utc)
     return None
 
+
+def make_preview(text, limit=PREVIEW_CHARS):
+    text = (text or "").strip()
+    if not text:
+        return "(Bài đăng chỉ có hình ảnh hoặc video, không có chữ)"
+    lines = [line.strip() for line in text.splitlines()]
+    cleaned = []
+    for line in lines:
+        if line or (cleaned and cleaned[-1]):
+            cleaned.append(line)
+    text = "\n".join(cleaned).strip()
+    if len(text) <= limit:
+        return text
+    cut = text[:limit]
+    if " " in cut[limit // 2:]:
+        cut = cut[: cut.rfind(" ")]
+    return cut.rstrip() + "…"
+
+
+def format_post_message(item, test=False):
+    page = item.get("pageName") or "Facebook"
+    link = item.get("url") or item.get("topLevelUrl") or ""
+    post_time = parse_post_time(item)
+    when = post_time.astimezone(VN_TZ).strftime("%H:%M %d/%m/%Y") if post_time else "không rõ"
+
+    header = "🧪 <b>[TEST]</b> " if test else ""
+    return (
+        f"{header}📢 <b>{html.escape(str(page))}</b>\n"
+        f"🕒 {when} (giờ VN)\n\n"
+        f"{html.escape(make_preview(item.get('text')))}\n\n"
+        f"🔗 <a href=\"{html.escape(link, quote=True)}\">Xem bài viết</a>"
+    )
+
+
+def process_items(items, max_age_hours, seed_only=False):
+    """Gửi các bài chưa gửi sang Telegram. Trả về số bài đã gửi."""
+    now = datetime.now(timezone.utc)
+    fresh = []
+    for item in items:
+        link = item.get("url") or item.get("topLevelUrl")
+        if not link:
+            continue
+        post_time = parse_post_time(item)
+        if post_time and now - post_time > timedelta(hours=max_age_hours):
+            continue  # bài quá cũ: bỏ qua
+        fresh.append((post_time or now, link, item))
+
+    fresh.sort(key=lambda row: row[0])  # cũ trước, mới sau
+
+    # Lọc ra các bài chưa từng gửi và ghi nhớ ngay (để không bị gửi trùng)
+    pending = []
+    with posts_lock:
+        for _, link, item in fresh:
+            if link in sent_posts:
+                continue
+            sent_posts[link] = time.time()
+            pending.append((link, item))
+
+    if seed_only:
+        return 0
+
+    if len(pending) > MAX_SEND_PER_SCAN:
+        print(f"⚠️ Có {len(pending)} bài mới, chỉ gửi {MAX_SEND_PER_SCAN} bài mới nhất.")
+        pending = pending[-MAX_SEND_PER_SCAN:]
+
+    sent = 0
+    for link, item in pending:
+        if send_telegram(format_post_message(item), html_mode=True):
+            sent += 1
+            print(f"✅ ĐÃ GỬI | {item.get('pageName')} | {link}")
+        else:
+            with posts_lock:
+                sent_posts.pop(link, None)  # gửi lỗi: cho phép thử lại ở lần quét sau
+            print(f"❌ GỬI THẤT BẠI | {item.get('pageName')} | {link}")
+
+    # dọn bộ nhớ: bỏ bài đã nhớ quá 3 ngày
+    cutoff = time.time() - 3 * 86400
+    with posts_lock:
+        for key in [k for k, v in sent_posts.items() if v < cutoff]:
+            del sent_posts[key]
+    return sent
+
+
 # ============================================================
-# 🆕 QUÉT FACEBOOK
+# 🔄 VÒNG LẶP QUÉT FACEBOOK
 # ============================================================
 
 def check_facebook():
-    first_run = True
     print("=" * 60)
-    print("🚀 FACEBOOK SCRAPER BOT KHỞI ĐỘNG")
-    print(f"📌 Số Page: {len(PAGE_LIST)}")
-    print("⏱️ Chu kỳ quét: 5 phút")
+    print("🚀 BOT QUÉT FACEBOOK (APIFY) KHỞI ĐỘNG")
+    print(f"📌 Page quét thường xuyên: {len(FAST_PAGES)} | page ít đăng: {len(SLOW_PAGES)}")
+    print(f"⏱️ Chu kỳ: {SCAN_INTERVAL_SEC // 60} phút | cửa sổ bài mới: {WINDOW_MIN} phút")
     print("=" * 60)
+
+    fail_count = 0
+    last_slow = 0.0
+    slow_seeded = False
 
     while True:
-        cycle_start = time.time()
-        for page_name, feed_url in RSS_FEEDS.items():
-            entries = read_page_feed(page_name, feed_url)
-            if not entries:
-                continue
-            for entry in reversed(entries):
-                post_id = get_post_id(entry)
-                if not post_id:
-                    continue
-                title = getattr(entry, "title", "Bài viết mới")
-                link = getattr(entry, "link", "")
-                if not link:
-                    continue
+        started = time.time()
 
-                if first_run:
-                    with posts_lock:
-                        sent_posts.add(post_id)
-                    continue
+        # --- Nhóm page chính ---
+        try:
+            newer = (datetime.now(timezone.utc) - timedelta(minutes=WINDOW_MIN)).strftime(
+                "%Y-%m-%dT%H:%M:%S.000Z"
+            )
+            items = run_apify(
+                [page_url(p) for p in FAST_PAGES],
+                RESULTS_LIMIT_FAST,
+                newer_than=newer,
+                max_charge=MAX_CHARGE_FAST_USD,
+            )
+            sent = process_items(items, MAX_AGE_HOURS_FAST)
+            print(f"🔎 Quét xong: Apify trả {len(items)} bài, đã gửi {sent} bài mới.")
+            status["last_result"] = f"OK: Apify trả {len(items)} bài, gửi {sent} bài mới"
+            status["scans_ok"] += 1
+            status["posts_sent"] += sent
+            if fail_count >= 3:
+                send_telegram("✅ Bot đã quét lại Facebook bình thường.")
+            fail_count = 0
+        except Exception as error:
+            fail_count += 1
+            status["last_result"] = f"LỖI: {type(error).__name__}: {str(error)[:150]}"
+            status["scans_failed"] += 1
+            print(f"⚠️ Quét thất bại ({fail_count} lần liên tiếp): {type(error).__name__}: {str(error)[:200]}")
+            if fail_count == 3:
+                send_telegram(
+                    "⚠️ Bot không lấy được bài Facebook 3 lần liên tiếp. "
+                    "Hãy kiểm tra credit/token trên Apify và log trên Render."
+                )
+        status["last_scan"] = datetime.now(VN_TZ).strftime("%d/%m/%Y %H:%M:%S")
 
-                with posts_lock:
-                    if post_id in sent_posts:
-                        continue
-                    sent_posts.add(post_id)
+        # --- Nhóm page ít đăng ---
+        if SLOW_PAGES and time.time() - last_slow >= SLOW_INTERVAL_SEC:
+            try:
+                items = run_apify(
+                    [page_url(p) for p in SLOW_PAGES],
+                    RESULTS_LIMIT_SLOW,
+                    newer_than=None,
+                    max_charge=MAX_CHARGE_SLOW_USD,
+                )
+                # Lần đầu chỉ ghi nhớ bài hiện có, không gửi (tránh gửi lại bài cũ).
+                sent = process_items(items, MAX_AGE_HOURS_SLOW, seed_only=not slow_seeded)
+                slow_seeded = True
+                last_slow = time.time()
+                print(f"🔎 Quét page ít đăng xong: gửi {sent} bài mới.")
+            except Exception as error:
+                print(f"⚠️ Quét page ít đăng thất bại: {type(error).__name__}: {str(error)[:200]}")
 
-                success = send_facebook_post(page_name, title, link)
-                if not success:
-                    with posts_lock:
-                        sent_posts.discard(post_id)
+        elapsed = time.time() - started
+        time.sleep(max(60, SCAN_INTERVAL_SEC - elapsed))
 
-        if first_run:
-            first_run = False
-            print(f"\n✅ ĐÃ HOÀN TẤT KHỞI TẠO. Đã ghi nhận {len(sent_posts)} bài cũ.")
-
-        elapsed = time.time() - cycle_start
-        print(f"\n⏱️ Chu kỳ hoàn tất sau {elapsed:.1f} giây. Nghỉ 5 phút...")
-        time.sleep(300)
 
 # ============================================================
-# ⏰ HỆ THỐNG QUOTE VÀ NHẮC NHỞ "PHẢI HƠN ĐIỂM THẰNG BẢO!"
+# ⏰ QUOTE + NHẮC GIỜ "PHẢI HƠN ĐIỂM THẰNG BẢO!"
 # ============================================================
+
+QUOTE_HOURS = {5, 13, 22}                       # gửi quote lúc 05:00, 13:00, 22:00
+BAO_HOURS = {0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22}  # nhắc mỗi 2 tiếng
+
 
 def check_quotes():
-    timezone = pytz.timezone("Asia/Ho_Chi_Minh")
-    sent_slots = set()
-    sent_bao_slots = set()
     print("💬 Hệ thống Quote và Nhắc nhở đã khởi chạy.")
-
-    # Các khung giờ gửi câu "PHẢI HƠN ĐIỂM THẰNG BẢO!" (cách nhau 2 tiếng: 0h, 2h, 4h, ..., 22h)
-    bao_hours = [0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22]
+    done = set()
 
     while True:
         try:
-            now = datetime.now(timezone)
-            current_hour = now.hour
-            current_minute = now.minute
+            now = datetime.now(VN_TZ)
+            day = now.strftime("%Y-%m-%d")
 
-            # 1. Gửi Quote mặc định (vào lúc 05:00, 13:00, 22:00)
-            slot = None
-            if current_hour == 5 and current_minute == 0:
-                slot = "05:00"
-            elif current_hour == 13 and current_minute == 0:
-                slot = "13:00"
-            elif current_hour == 22 and current_minute == 0:
-                slot = "22:00"
+            # Trong 5 phút đầu của giờ đó, nếu chưa gửi thì gửi (có cơ hội thử lại nếu lỗi mạng)
+            if now.minute < 5:
+                quote_key = f"{day} quote {now.hour}"
+                if now.hour in QUOTE_HOURS and quote_key not in done:
+                    print(f"💬 Đang gửi quote {now.hour:02d}:00...")
+                    if send_telegram(get_next_quote()):
+                        done.add(quote_key)
 
-            if slot and slot not in sent_slots:
-                quote = get_next_quote()
-                print(f"💬 Đang gửi quote {slot}...")
-                success = send_telegram(quote)
-                if success:
-                    sent_slots.add(slot)
-                time.sleep(60)
+                bao_key = f"{day} bao {now.hour}"
+                if now.hour in BAO_HOURS and bao_key not in done:
+                    print(f"🔥 Đang gửi nhắc nhở {now.hour:02d}:00...")
+                    if send_telegram("PHẢI HƠN ĐIỂM THẰNG BẢO!"):
+                        done.add(bao_key)
 
-            # 2. Gửi câu "PHẢI HƠN ĐIỂM THẰNG BẢO!" cách mỗi 2 tiếng đúng phút 00
-            if current_hour in bao_hours and current_minute == 0:
-                bao_key = f"{current_hour:02d}:00"
-                if bao_key not in sent_bao_slots:
-                    print(f"🔥 Đang gửi nhắc nhở lúc {bao_key}...")
-                    success = send_telegram("PHẢI HƠN ĐIỂM THẰNG BẢO!")
-                    if success:
-                        sent_bao_slots.add(bao_key)
-                    time.sleep(60)
-
-            # Reset lại danh sách đã gửi vào đầu ngày mới (00:01)
-            if current_hour == 0 and current_minute == 1:
-                sent_slots.clear()
-                sent_bao_slots.clear()
-                print("🔄 Đã reset lịch nhắc nhở và quote cho ngày mới.")
-                time.sleep(60)
+            # dọn các mốc của ngày cũ
+            for key in [k for k in done if not k.startswith(day)]:
+                done.discard(key)
 
             time.sleep(20)
         except Exception as error:
-            print(f"❌ Lỗi hệ thống quote: {error}")
+            print(f"❌ Lỗi hệ thống quote: {type(error).__name__}")
             time.sleep(30)
 
+
 # ============================================================
-# 🌐 FLASK WEB SERVER
+# 🌐 FLASK WEB SERVER (để UptimeRobot ping giữ bot thức)
 # ============================================================
 
 app = Flask(__name__)
 
+
 @app.route("/")
 def home():
-    return "✅ Facebook Scraper Bot đang chạy 24/7."
+    return "✅ Bot đang chạy 24/7."
 
-@app.route("/test")
-def test_send():
-    success = send_telegram("🧪 **TEST TELEGRAM BOT**\n\nKết nối thành công!")
-    return "✅ TEST THÀNH CÔNG!" if success else "❌ TEST THẤT BẠI!"
 
 @app.route("/health")
 def health():
     return "OK", 200
 
-# ============================================================
-# 🧪 LỆNH TEST QUOTE VÀ TEST POST GẦN NHẤT
-# ============================================================
+
+@app.route("/status")
+def show_status():
+    lines = [
+        f"Khởi động lúc: {status['started_at']}",
+        f"Lần quét gần nhất: {status['last_scan']}",
+        f"Kết quả: {status['last_result']}",
+        f"Số lần quét OK / lỗi: {status['scans_ok']} / {status['scans_failed']}",
+        f"Số bài đã gửi từ lúc khởi động: {status['posts_sent']}",
+        f"Có BOT_TOKEN: {'có' if BOT_TOKEN else 'KHÔNG'} | Có APIFY_TOKEN: {'có' if APIFY_TOKEN else 'KHÔNG'}",
+    ]
+    return "<br>".join(html.escape(line) for line in lines)
+
+
+@app.route("/test")
+def test_send():
+    ok = send_telegram("🧪 TEST BOT: kết nối Telegram thành công!")
+    return "✅ TEST THÀNH CÔNG!" if ok else "❌ TEST THẤT BẠI! (xem Logs trên Render)"
+
 
 @app.route("/testquote")
 def test_quote():
-    quote = get_next_quote()
-    test_message = f"🧪 **[TEST QUOTE]**\n\n{quote}"
-    success = send_telegram(test_message)
-    if success:
-        return "✅ Đã test gửi Quote thành công! Hãy kiểm tra Telegram."
-    return "❌ Test gửi Quote thất bại!"
+    ok = send_telegram(f"🧪 [TEST QUOTE]\n\n{get_next_quote()}")
+    return "✅ Đã gửi quote thử." if ok else "❌ Gửi quote thất bại!"
+
 
 @app.route("/testbao")
 def test_bao():
-    success = send_telegram("PHẢI HƠN ĐIỂM THẰNG BẢO!")
-    return "✅ Đã test gửi câu nhắc Thằng Bảo!" if success else "❌ Test thất bại!"
+    ok = send_telegram("PHẢI HƠN ĐIỂM THẰNG BẢO!")
+    return "✅ Đã gửi câu nhắc." if ok else "❌ Thất bại!"
+
+
+def _run_test_post():
+    try:
+        items = run_apify([page_url("tuoitredhthudaumot")], 1, None, 0.05)
+        if not items:
+            print("🧪 testpost: Apify không trả về bài nào.")
+            return
+        ok = send_telegram(format_post_message(items[0], test=True), html_mode=True)
+        print(f"🧪 testpost: gửi {'OK' if ok else 'THẤT BẠI'}")
+    except Exception as error:
+        print(f"🧪 testpost lỗi: {type(error).__name__}: {str(error)[:200]}")
+
 
 @app.route("/testpost")
 def test_post():
-    for page_name, feed_url in RSS_FEEDS.items():
-        entries = read_page_feed(page_name, feed_url)
-        if not entries:
-            continue
-        
-        # Bốc ngay bài đăng gần nhất (phần tử đầu tiên) để test ngay lập tức
-        entry = entries[0]
-        title = getattr(entry, "title", "Bài viết mới")
-        link = getattr(entry, "link", "")
-        
-        if not link:
-            link = f"https://facebook.com/{page_name}"
-            
-        message = (
-            f"🧪 **[TEST BÀI ĐĂNG GẦN NHẤT]**\n\n"
-            f"📄 **Page:** {page_name}\n\n"
-            f"{title}\n\n"
-            f"🔗 [Xem bài viết]({link})"
-        )
-        
-        success = send_telegram(message)
-        if success:
-            return f"✅ Đã test lấy thành công bài viết gần nhất từ page: <b>{page_name}</b>!"
-        else:
-            return f"❌ Lỗi khi gửi tin nhắn test về Telegram cho page: {page_name}"
-            
-    return "❌ Không thể cào được bài viết nào từ danh sách các page lúc này."
+    if not APIFY_TOKEN:
+        return "❌ Chưa có APIFY_TOKEN trong Environment của Render."
+    threading.Thread(target=_run_test_post, daemon=True).start()
+    return "⏳ Đang lấy thử 1 bài của page tuoitredhthudaumot. Chờ 1-2 phút rồi xem Telegram."
+
 
 # ============================================================
-# 🚀 KHỞI ĐỘNG THREADS KHI IMPORT HOẶC CHẠY
+# 🚀 KHỞI ĐỘNG CÁC LUỒNG NỀN
 # ============================================================
+
+_started = False
+
 
 def start_background_tasks():
-    if not BOT_TOKEN or "phần này" in BOT_TOKEN:
-        print("❌ CHƯA ĐIỀN BOT_TOKEN!")
+    global _started
+    if _started:
+        return
+    _started = True
+
+    if not BOT_TOKEN:
+        print("❌ CHƯA CÓ BOT_TOKEN! Hãy thêm biến BOT_TOKEN trong Render > Environment.")
         return
 
-    fb_thread = threading.Thread(target=check_facebook, name="FacebookMonitor", daemon=True)
-    fb_thread.start()
+    threading.Thread(target=check_quotes, name="QuoteScheduler", daemon=True).start()
 
-    q_thread = threading.Thread(target=check_quotes, name="QuoteScheduler", daemon=True)
-    q_thread.start()
+    if APIFY_TOKEN:
+        threading.Thread(target=check_facebook, name="FacebookMonitor", daemon=True).start()
+    else:
+        print("❌ CHƯA CÓ APIFY_TOKEN! Bot chỉ gửi quote, chưa quét Facebook.")
+
 
 start_background_tasks()
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8080, threaded=True)
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", "8080")), threaded=True)
