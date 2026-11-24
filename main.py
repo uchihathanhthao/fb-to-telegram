@@ -1,3 +1,4 @@
+import os
 import time
 import requests
 import random
@@ -11,8 +12,7 @@ from bs4 import BeautifulSoup
 # 🔐 TELEGRAM BOT TOKEN
 # ============================================================
 
-BOT_TOKEN = "8746522888:AAE1drDmhydNlZB5YAkO82_u8ZzNsmZ_LxY"
-
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 # ============================================================
 # ⚙️ TELEGRAM CHAT ID
 # ============================================================
