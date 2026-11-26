@@ -1,4 +1,5 @@
 import os
+import json
 import time
 import html
 import random
@@ -44,19 +45,23 @@ PAGE_LIST = [
     "clbsinhvienkhoinghiepTDMU",
     "61552398976258",
     "doanhoikhoasupham",
-    "clbthanhnientinhnguyen.tdmu",
     "KyNangTDMU",
     "FFL.TDMU",
     "khoangoaingu.tdmu",
-    "100076805206008",
+    # --- Các page thêm ngày 26/11 ---
+    "hoisinhvien.com.vn",
+    "doanhoitruongkinhtetaichinh",
+    "DoanHoiVienDTKTXDVGT",
+    "viencongngheso",
+    "dtn.bhtcds",
+    "hotronguoihocTDMU",
+    "doanhoikhoacongnghiepvanhoa",
+    "doanhoitlvqlpttdmu",
 ]
 
 # Các page ít đăng bài (bài mới nhất là bài rất cũ). Quét thưa hơn, không dùng bộ lọc thời gian,
 # vì bài ghim cũ có thể làm bộ lọc dừng quá sớm.
-SLOW_PAGES = [
-    "clbthanhnientinhnguyen.tdmu",
-    "100076805206008",
-]
+SLOW_PAGES = []  # hiện không có page nào ít đăng; thêm tên page vào đây nếu cần
 
 FAST_PAGES = [p for p in PAGE_LIST if p not in SLOW_PAGES]
 
@@ -95,8 +100,12 @@ def page_url(page):
 # 🧠 BỘ NHỚ (bài đã gửi, trạng thái quét)
 # ============================================================
 
-sent_posts = {}                    # link bài -> thời điểm đã gửi
+sent_posts = {}                    # khóa của bài (link, giờ đăng) -> thời điểm đã gửi
 posts_lock = threading.Lock()
+state_dirty = False                # True khi có bài mới được ghi nhớ mà chưa lưu lên Apify
+state_store_id = None              # ID kho lưu trạng thái trên Apify (None = chưa dùng được)
+STATE_STORE_NAME = "fb-bot-state"  # tên kho lưu (key-value store) trên tài khoản Apify của bạn
+STATE_RECORD_KEY = "sent_posts"
 
 status = {
     "started_at": datetime.now(VN_TZ).strftime("%d/%m/%Y %H:%M:%S"),
@@ -105,6 +114,7 @@ status = {
     "scans_ok": 0,
     "scans_failed": 0,
     "posts_sent": 0,
+    "persist": "chưa kiểm tra",
 }
 
 # ============================================================
@@ -242,6 +252,98 @@ def run_apify(urls, results_limit, newer_than=None, max_charge=0.10):
 
 
 # ============================================================
+# 💾 NHỚ BÀI ĐÃ GỬI (chống gửi trùng, kể cả khi bot khởi động lại)
+#    Danh sách được lưu trên Apify (kho "fb-bot-state"), vì ổ đĩa của Render
+#    gói Free bị xóa mỗi lần khởi động lại.
+# ============================================================
+
+def normalize_url(url):
+    """Bỏ phần đuôi ?... của link bài (phần này có thể thay đổi giữa các lần lấy)."""
+    base, _, _ = url.partition("?")
+    if base.endswith(".php"):   # kiểu permalink.php?story_fbid=... thì phần sau ? là phần quan trọng
+        return url
+    return base.rstrip("/")
+
+
+def post_keys(item):
+    """Các 'dấu vân tay' của một bài: link (đã chuẩn hóa) và cặp (page, giờ đăng).
+    Chỉ cần trùng một trong hai là coi như bài đã gửi."""
+    keys = []
+    link = item.get("url") or item.get("topLevelUrl")
+    if link:
+        keys.append("u:" + normalize_url(link))
+    post_time = parse_post_time(item)
+    page = item.get("pageName") or item.get("facebookUrl")
+    if post_time and page:
+        keys.append(f"t:{page}:{int(post_time.timestamp())}")
+    return keys
+
+
+def load_state():
+    """Nạp danh sách bài đã gửi từ Apify. Trả về True nếu thành công."""
+    global state_store_id
+    try:
+        response = requests.post(
+            f"{APIFY_API}/key-value-stores",
+            params={"name": STATE_STORE_NAME},   # đã có thì trả về kho cũ, chưa có thì tạo mới
+            headers=_apify_headers(),
+            timeout=30,
+        )
+        response.raise_for_status()
+        store_id = response.json()["data"]["id"]
+
+        record = requests.get(
+            f"{APIFY_API}/key-value-stores/{store_id}/records/{STATE_RECORD_KEY}",
+            headers=_apify_headers(),
+            timeout=30,
+        )
+        data = {}
+        if record.status_code != 404:
+            record.raise_for_status()
+            data = record.json()
+
+        cutoff = time.time() - 3 * 86400
+        loaded = 0
+        if isinstance(data, dict):
+            with posts_lock:
+                for key, stamp in data.items():
+                    if isinstance(stamp, (int, float)) and stamp >= cutoff and key not in sent_posts:
+                        sent_posts[key] = stamp
+                        loaded += 1
+        state_store_id = store_id
+        status["persist"] = "BẬT"
+        print(f"💾 Bộ nhớ bền sẵn sàng, đã nạp {loaded} bài đã gửi.")
+        return True
+    except Exception as error:
+        state_store_id = None
+        status["persist"] = "TẮT (không kết nối được kho lưu trên Apify)"
+        print(f"⚠️ Chưa dùng được bộ nhớ bền: {type(error).__name__}: {str(error)[:150]}")
+        return False
+
+
+def save_state():
+    """Lưu danh sách bài đã gửi lên Apify. Trả về True nếu thành công."""
+    global state_dirty
+    if not state_store_id:
+        return False
+    try:
+        with posts_lock:
+            snapshot = dict(sent_posts)
+        response = requests.put(
+            f"{APIFY_API}/key-value-stores/{state_store_id}/records/{STATE_RECORD_KEY}",
+            data=json.dumps(snapshot).encode("utf-8"),
+            headers={**_apify_headers(), "Content-Type": "application/json; charset=utf-8"},
+            timeout=30,
+        )
+        response.raise_for_status()
+        state_dirty = False
+        return True
+    except Exception as error:
+        print(f"⚠️ Lưu bộ nhớ bền thất bại: {type(error).__name__}: {str(error)[:150]}")
+        return False
+
+
+# ============================================================
 # ✉️ ĐỊNH DẠNG TIN NHẮN BÀI ĐĂNG
 # ============================================================
 
@@ -313,13 +415,18 @@ def process_items(items, max_age_hours, seed_only=False):
     fresh.sort(key=lambda row: row[0])  # cũ trước, mới sau
 
     # Lọc ra các bài chưa từng gửi và ghi nhớ ngay (để không bị gửi trùng)
+    global state_dirty
     pending = []
     with posts_lock:
         for _, link, item in fresh:
-            if link in sent_posts:
-                continue
-            sent_posts[link] = time.time()
-            pending.append((link, item))
+            keys = post_keys(item)
+            if any(k in sent_posts for k in keys):
+                continue  # đã gửi rồi
+            stamp = time.time()
+            for k in keys:
+                sent_posts[k] = stamp
+            pending.append((keys, link, item))
+            state_dirty = True
 
     if seed_only:
         return 0
@@ -329,13 +436,14 @@ def process_items(items, max_age_hours, seed_only=False):
         pending = pending[-MAX_SEND_PER_SCAN:]
 
     sent = 0
-    for link, item in pending:
+    for keys, link, item in pending:
         if send_telegram(format_post_message(item), html_mode=True):
             sent += 1
             print(f"✅ ĐÃ GỬI | {item.get('pageName')} | {link}")
         else:
             with posts_lock:
-                sent_posts.pop(link, None)  # gửi lỗi: cho phép thử lại ở lần quét sau
+                for k in keys:
+                    sent_posts.pop(k, None)  # gửi lỗi: cho phép thử lại ở lần quét sau
             print(f"❌ GỬI THẤT BẠI | {item.get('pageName')} | {link}")
 
     # dọn bộ nhớ: bỏ bài đã nhớ quá 3 ngày
@@ -363,6 +471,10 @@ def check_facebook():
 
     while True:
         started = time.time()
+
+        # Nạp danh sách bài đã gửi từ Apify (thử lại mỗi vòng nếu lần trước thất bại)
+        if not state_store_id:
+            load_state()
 
         # --- Nhóm page chính ---
         try:
@@ -394,6 +506,8 @@ def check_facebook():
                     "Hãy kiểm tra credit/token trên Apify và log trên Render."
                 )
         status["last_scan"] = datetime.now(VN_TZ).strftime("%d/%m/%Y %H:%M:%S")
+        if state_dirty:
+            save_state()
 
         # --- Nhóm page ít đăng ---
         if SLOW_PAGES and time.time() - last_slow >= SLOW_INTERVAL_SEC:
@@ -411,6 +525,8 @@ def check_facebook():
                 print(f"🔎 Quét page ít đăng xong: gửi {sent} bài mới.")
             except Exception as error:
                 print(f"⚠️ Quét page ít đăng thất bại: {type(error).__name__}: {str(error)[:200]}")
+            if state_dirty:
+                save_state()
 
         elapsed = time.time() - started
         time.sleep(max(60, SCAN_INTERVAL_SEC - elapsed))
@@ -482,6 +598,7 @@ def show_status():
         f"Kết quả: {status['last_result']}",
         f"Số lần quét OK / lỗi: {status['scans_ok']} / {status['scans_failed']}",
         f"Số bài đã gửi từ lúc khởi động: {status['posts_sent']}",
+        f"Bộ nhớ chống gửi trùng khi khởi động lại: {status['persist']} (đang nhớ {len(sent_posts)} khóa)",
         f"Có BOT_TOKEN: {'có' if BOT_TOKEN else 'KHÔNG'} | Có APIFY_TOKEN: {'có' if APIFY_TOKEN else 'KHÔNG'}",
     ]
     return "<br>".join(html.escape(line) for line in lines)
